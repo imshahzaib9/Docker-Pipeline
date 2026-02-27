@@ -41,4 +41,4 @@ jobs:
           # Run Ubuntu container
           sudo docker run -d --name my-ubuntu ubuntu sleep infinity
 
-          EOF
+        
