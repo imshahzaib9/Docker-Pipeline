@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline — Build, Push & Deploy
 
 on:
   push:
@@ -10,73 +10,129 @@ env:
   DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/nodejs-cicd-demo
   APP_PORT: 3000
 
-# ── JOB 1: Test ──────────────────────────────────────
 jobs:
+  # ──────────────────────────────────────────────
+  # JOB 1: Test
+  # Runs on every push AND every pull_request to main
+  # ──────────────────────────────────────────────
   test:
-    name: Run Tests
+    name: Test Stage
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-          cache: "npm"
-      - run: npm ci
-      - run: npm test
 
-# ── JOB 2: Build & Push ──────────────────────────────
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Tests
+        run: npm test
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+
+  # ──────────────────────────────────────────────
+  # JOB 2: Build & Push Docker Image
+  # Runs ONLY on push to main (not on PRs).
+  # The if condition lives HERE only — not repeated
+  # on deploy — so the needs chain stays intact.
+  # ──────────────────────────────────────────────
   build-and-push:
-    name: Build & Push to Docker Hub
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: test                                        # ← waits for test to succeed
+    if: github.event_name == 'push'                   # ← skip on pull_request events
+
     outputs:
       short_sha: ${{ steps.vars.outputs.short_sha }}
+
     steps:
-      - uses: actions/checkout@v4
-      - id: vars
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Short SHA
+        id: vars
         run: echo "short_sha=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
+
+      - name: Extract Docker Metadata
         id: meta
+        uses: docker/metadata-action@v5
         with:
           images: ${{ env.DOCKER_IMAGE }}
           tags: |
             type=sha,prefix=sha-
             type=raw,value=latest
-      - uses: docker/build-push-action@v5
+
+      - name: Build & Push Docker Image
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-# ── JOB 3: Deploy ────────────────────────────────────
+  # ──────────────────────────────────────────────
+  # JOB 3: Deploy to EC2
+  # No extra `if` needed — it inherits the gate
+  # from build-and-push via `needs`. If build is
+  # skipped (PR), deploy is automatically skipped.
+  # ──────────────────────────────────────────────
   deploy:
-    name: Deploy to EC2
+    name: Deployment Stage
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: build-and-push                             # ← inherits the push-only gate
+
     steps:
-      - uses: appleboy/ssh-action@v1.0.0
+      - name: Deploy via SSH to EC2
+        uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            echo "🚀 Starting deployment..."
+
+            # Pull latest image
             docker pull ${{ env.DOCKER_IMAGE }}:latest
+
+            # Stop and remove old container if running
             docker stop nodejs-app 2>/dev/null || true
             docker rm   nodejs-app 2>/dev/null || true
+
+            # Run new container
             docker run -d \
               --name nodejs-app \
               --restart unless-stopped \
-              -p 3000:3000 \
+              -p ${{ env.APP_PORT }}:3000 \
               -e NODE_ENV=production \
+              -e APP_VERSION=${{ needs.build-and-push.outputs.short_sha }} \
               ${{ env.DOCKER_IMAGE }}:latest
+
+            # Health check
             sleep 5
-            docker ps | grep nodejs-app
+            docker ps | grep nodejs-app && echo "✅ Deployment successful!" || echo "❌ Deployment failed!"
+
+            # Cleanup old images
             docker image prune -f
