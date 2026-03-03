@@ -16,7 +16,7 @@ jobs:
   # Runs on every push AND every pull_request to main
   # ──────────────────────────────────────────────
   test:
-    name: Test Stage
+    name: Run Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -30,7 +30,7 @@ jobs:
           cache: 'npm'
 
       - name: Install Dependencies
-        run: npm ci
+        run: npm install
 
       - name: Run Tests
         run: npm test
@@ -49,7 +49,7 @@ jobs:
   # on deploy — so the needs chain stays intact.
   # ──────────────────────────────────────────────
   build-and-push:
-    name: Build & Push Docker Image
+    name: Build & Push to Docker Hub
     runs-on: ubuntu-latest
     needs: test                                        # ← waits for test to succeed
     if: github.event_name == 'push'                   # ← skip on pull_request events
@@ -100,7 +100,7 @@ jobs:
   # skipped (PR), deploy is automatically skipped.
   # ──────────────────────────────────────────────
   deploy:
-    name: Deployment Stage
+    name: Deploy to EC2
     runs-on: ubuntu-latest
     needs: build-and-push                             # ← inherits the push-only gate
 
